@@ -90,7 +90,11 @@ function main() {
         args.push('--reporters=default', '--reporters=jest-junit');
         process.env.JEST_JUNIT_OUTPUT_DIR = process.env.JEST_JUNIT_OUTPUT_DIR
             || path.join(__dirname, '..', 'test-results');
-        process.env.JEST_JUNIT_UNIQUE_OUTPUT_NAME = 'true';
+        // NB: JEST_JUNIT_UNIQUE_OUTPUT_NAME is deliberately NOT set — it
+        // makes jest-junit generate a uuid via the `uuid` package, which
+        // needs globalThis.crypto (Node >= 19) and crashes on this project's
+        // Node 18. Each CI shard is its own runner, so the default
+        // junit.xml name cannot collide.
     }
 
     const retry = Number(process.env.JEST_RETRY || 0);
