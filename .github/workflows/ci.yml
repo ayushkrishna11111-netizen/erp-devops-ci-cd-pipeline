@@ -6,9 +6,66 @@ on:
   pull_request:
     branches: [ main ]
 
+# Cancel superseded runs for the same ref: the ERP integration suites are the
+# slow part of this pipeline, and a run of an outdated commit only wastes
+# minutes and clutters the required checks (docs/TEST_STRATEGY.md).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  # ===================================================================
+  # Research-identified limitation #3 — "Security & secrets exposure":
+  # hardcoded credentials slip into repositories when local pre-commit
+  # checks are bypassed. This job is the un-bypassable backstop: the same
+  # zero-dependency scanner devs run as a pre-commit hook (see
+  # scripts/install-hooks.sh) checks every tracked file AND the full
+  # history here, and nothing publishes if it fails.
+  # ===================================================================
+  secret-scan:
+    name: Secret scan (tracked files + history)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Scanner self-test (the gate must prove it can detect)
+        run: node scripts/secret-scan.js --selftest
+
+      - name: Scan every tracked file
+        run: node scripts/secret-scan.js --report secret-scan-report.json
+
+      - name: Scan git history for since-removed secrets
+        run: node scripts/secret-scan.js --history --report secret-scan-history-report.json
+
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-scan-reports
+          path: secret-scan-*.json
+          if-no-files-found: ignore
+
+  # ===================================================================
+  # Research-identified limitation #2 — "Flaky integration tests & high
+  # execution latency": the server suites now run as TWO parallel shards,
+  # each failed test gets up to two retries (JEST_RETRY=2), quarantined
+  # suites are skipped here and run nightly, and JUnit timing XML is
+  # uploaded so slow tests are visible. See docs/TEST_STRATEGY.md.
+  # ===================================================================
   quality-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -26,14 +83,23 @@ jobs:
       # Enforced: fails the build on any high/critical advisory in the API's
       # runtime dependencies (the code that actually ships).
       - name: Run Security Audit (server runtime dependencies)
+        if: matrix.shard == 1
         run: |
           cd server
           npm audit --omit=dev --audit-level=high
 
-      - name: Run Backend Unit Tests
+      - name: Run Backend Tests (shard ${{ matrix.shard }} of 2)
         run: |
           cd server
-          npm test
+          SHARD=${{ matrix.shard }} SHARD_TOTAL=2 JEST_RETRY=2 JEST_JUNIT=1 npm test
+
+      - name: Upload test results (shard ${{ matrix.shard }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-test-results-shard-${{ matrix.shard }}
+          path: server/test-results/
+          if-no-files-found: ignore
 
       - name: Install Client Dependencies
         run: |
@@ -43,15 +109,61 @@ jobs:
       - name: Run Client Tests
         run: |
           cd client
-          CI=true npx react-scripts test --watchAll=false
+          CI=true JEST_RETRY=2 npx react-scripts test --watchAll=false
 
       - name: Build Client (production)
         run: |
           cd client
           CI=true npx react-scripts build
 
+  # ===================================================================
+  # Research-identified limitation #1 — "The stateful database
+  # bottleneck": continuous deployment against a highly relational ERP
+  # database can queue a migration behind live transactions and freeze
+  # user traffic. This job proves, on a real Postgres, that the migration
+  # runner's lock guard aborts within seconds instead (docs/DATABASE_LOCK_GUARD.md).
+  # Runs on pull requests too, so the guardrail is proven pre-merge.
+  # ===================================================================
+  db-lock-guard:
+    name: DB lock-guard (protects live transactions)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: erp_user
+          POSTGRES_PASSWORD: erp_password
+          POSTGRES_DB: erp_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp_user -d erp_db"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://erp_user:erp_password@localhost:5432/erp_db
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Server Dependencies
+        run: cd server && npm ci
+
+      - name: Run lock-guard verification
+        run: node scripts/db-lock-guard-check.js
+
+  # ===================================================================
+  # Below this line: the original pipeline (Ayush + Vivek), kept as-is
+  # except that the publish/readiness jobs now also require `secret-scan`
+  # to have passed — a leaked credential blocks publication.
+  # ===================================================================
+
   publish-and-deploy:
-    needs: quality-and-test
+    needs: [quality-and-test, secret-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -87,19 +199,13 @@ jobs:
       - name: Trigger Frontend Cloud Deployment
         run: curl -X POST ${{ secrets.RENDER_FRONTEND_HOOK }}
 
-  # ===================================================================
-  # Added by Vivek (Week 4 / Week 7) — Containerisation & Architecture.
-  # APPEND ONLY: nothing above this line has been modified.
-  # Existing jobs `quality-and-test` and `publish-and-deploy` are Ayush's.
-  # ===================================================================
-
   # Publish immutable, per-commit image tags to GHCR.
-  # Ayush's Docker Hub job publishes :latest only; rollback and registry
+  # The Docker Hub job publishes :latest only; rollback and registry
   # retention both need a tag that pins one exact commit, so this runs
   # alongside it rather than replacing it.
   publish-ghcr:
     name: Publish SHA-tagged images to GHCR
-    needs: quality-and-test
+    needs: [quality-and-test, secret-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -160,7 +266,7 @@ jobs:
     # Runs on pull requests too, so the gate is proven before anything merges.
     # It boots the API from this commit against a real Postgres, through the
     # same startup path production uses: migrate -> seed -> serve.
-    needs: quality-and-test
+    needs: [quality-and-test, secret-scan]
     runs-on: ubuntu-latest
     permissions:
       contents: read

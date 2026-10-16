@@ -1,0 +1,18 @@
+# Optional hook setup for users of the `pre-commit` framework
+# (https://pre-commit.com). scripts/install-hooks.sh does the same job without
+# any extra tooling — pick either. See docs/SECRET_SCANNING.md.
+repos:
+  - repo: local
+    hooks:
+      - id: secret-scan-staged
+        name: secret scan (staged files, same rules as CI)
+        entry: node scripts/secret-scan.js --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # Industry-standard second opinion, if you prefer it installed via pre-commit.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks

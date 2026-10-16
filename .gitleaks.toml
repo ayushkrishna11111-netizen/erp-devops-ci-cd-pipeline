@@ -1,0 +1,30 @@
+# Gitleaks configuration (docs/SECRET_SCANNING.md).
+#
+# Gitleaks is the industry-standard scanner and runs as a SECOND opinion —
+# locally via the pre-commit hook and nightly over full history. The repo's
+# own zero-dependency scanner (scripts/secret-scan.js) is the gate that always
+# runs, because it needs no binary install.
+title = "ERP DevOps CI/CD Pipeline gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Published placeholders, demo credentials that are deliberately public
+(printed in the README), and lockfiles.
+"""
+paths = [
+  '''\.env\.example$''',
+  '''package-lock\.json$''',
+]
+regexes = [
+  '''CHANGE_ME''',
+  '''dev_secret_key''',
+  '''local_deploy_token''',
+  '''ci_gate_secret''',
+  '''Admin123!''',
+  '''Manager123!''',
+  '''User123!''',
+  '''pw123456''',
+]

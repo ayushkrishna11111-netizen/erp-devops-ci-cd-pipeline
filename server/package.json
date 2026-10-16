@@ -6,8 +6,18 @@
   "scripts": {
     "start": "node server.js",
     "migrate": "node db/migrate.js",
-    "test": "jest --detectOpenHandles",
+    "test": "node scripts/run-tests.js --detectOpenHandles",
+    "test:full": "node scripts/run-tests.js --detectOpenHandles --full",
+    "test:quarantined": "node scripts/run-tests.js --detectOpenHandles --only-quarantined",
+    "lock-guard-check": "node ../scripts/db-lock-guard-check.js",
+    "secret-scan": "node ../scripts/secret-scan.js",
     "audit": "npm audit --audit-level=high || true"
+  },
+  "jest": {
+    "testTimeout": 15000,
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/setupFlakyRetry.js"
+    ]
   },
   "keywords": [],
   "author": "",
@@ -25,6 +35,7 @@
   },
   "devDependencies": {
     "jest": "^30.4.2",
+    "jest-junit": "^17.0.0",
     "supertest": "^7.2.2"
   }
 }

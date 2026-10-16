@@ -3,3 +3,8 @@ server/node_modules/
 client/node_modules/
 build/
 .env
+
+# CI / local tool output
+server/test-results/
+secret-scan-*.json
+junit*.xml

@@ -56,6 +56,37 @@ Self-registration always creates an Employee. Only a signed-in Admin can
 create a Manager or Admin. No token gives **401**; the wrong role gives
 **403**. Full matrix: [docs/ACCESS_MATRIX.md](docs/ACCESS_MATRIX.md).
 
+This repository is an extension of
+[akhileshm6/ERP-DevOps-CI-CD-Pipeline-Implementation](https://github.com/akhileshm6/ERP-DevOps-CI-CD-Pipeline-Implementation);
+the pipeline below was kept and three research-identified limitations were
+engineered away on top of it (next section).
+
+## Pipeline hardening — three research-identified limitations
+
+CI/CD for ERP systems has documented failure modes. This project implements
+the accepted mitigation for the three most cited ones:
+
+1. **The stateful database bottleneck** — a deployment must never be able to
+   freeze live user transactions. The migration runner now runs under a
+   bounded `lock_timeout` (5s default) and `statement_timeout`, so a schema
+   change that cannot get a lock *aborts in seconds and rolls back* instead
+   of queueing behind (and blocking) live traffic; application connections
+   carry matching guardrails against runaway queries and idle-in-transaction
+   sessions. Proven against a real Postgres by the `db-lock-guard` CI job on
+   every push and PR —
+   [docs/DATABASE_LOCK_GUARD.md](docs/DATABASE_LOCK_GUARD.md).
+2. **Flaky integration tests & high execution latency** — server suites are
+   split across parallel CI shards, transient failures get bounded retries
+   (`JEST_RETRY`), genuinely flaky suites move into an explicit quarantine
+   lane that is skipped on PRs but runs every night, and superseded PR runs
+   are cancelled —
+   [docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md).
+3. **Security & secrets exposure** — one zero-dependency scanner runs in
+   three places: as a pre-commit hook over staged files, in CI over every
+   tracked file *and the full git history* (gating publication), and nightly
+   alongside gitleaks —
+   [docs/SECRET_SCANNING.md](docs/SECRET_SCANNING.md).
+
 ## Run it locally
 
 Requires Docker Desktop.
@@ -121,14 +152,27 @@ never edit a file that has already been applied.
 ## Tests
 
 ```bash
-cd server && npm test                                 # API, RBAC, data, auth (in-memory store)
+cd server && npm test                                 # everything except quarantined suites (docs/TEST_STRATEGY.md)
+cd server && npm test -- --full                       # include quarantined suites
+cd server && npm test -- --only-quarantined           # the nightly quarantine lane
+cd client && CI=true npx react-scripts test --watchAll=false
+cd client && CI=true npx react-scripts build          # production build
+cd server && npm audit --omit=dev
+node scripts/secret-scan.js --selftest                # scanner self-check
+node scripts/secret-scan.js                           # scan tracked files for secrets
+node scripts/db-lock-guard-check.js                   # needs DATABASE_URL (throwaway Postgres)
 cd client && CI=true npx react-scripts test --watchAll=false
 cd client && CI=true npx react-scripts build          # production build
 cd server && npm audit --omit=dev
 ```
 
+`npm test` is a launcher (server/scripts/run-tests.js) that skips
+quarantined suites, honours SHARD/SHARD_TOTAL for parallel CI sharding and
+JEST_RETRY for bounded flaky-test retries.
+
 Server tests use the in-memory store, so they need no database. The CI
-readiness gate repeats the important checks against a real PostgreSQL.
+readiness gate repeats the important checks against a real PostgreSQL, and
+the separate db-lock-guard job proves the migration lock guard on one too.
 
 ## CI/CD pipeline
 
@@ -146,6 +190,19 @@ readiness gate repeats the important checks against a real PostgreSQL.
    `production` environment can require a reviewer. It triggers the Render deploy
    hook, smoke-tests `/ready`, and records the outcome (success or failure)
    through `POST /api/deployments`.
+
+Two more jobs run on every push and pull request:
+
+5. **secret-scan**: scanner self-test, then every tracked file and the full
+   git history. `publish-ghcr`, `publish-and-deploy` and the readiness gate
+   all require it to pass — a leaked credential blocks publication.
+6. **db-lock-guard**: runs the migration runner against a real Postgres
+   while a second session holds an exclusive table lock, proving the guard
+   aborts within seconds instead of blocking live transactions.
+
+A nightly workflow (.github/workflows/nightly-suite.yml) additionally runs
+the full suite including quarantined tests, the lock-guard proof and a full
+history scan with gitleaks.
 
 The deploy record endpoint accepts only CI (header `X-Deploy-Token`, matching
 `DEPLOY_API_TOKEN`). It is separate from user login, and in staging/production
@@ -207,6 +264,9 @@ limits, no internal error text in API responses. Details:
 | [docs/ACCESS_MATRIX.md](docs/ACCESS_MATRIX.md) | RBAC per route, feature-flag evaluation |
 | [docs/DEPLOY_GATING.md](docs/DEPLOY_GATING.md) | How the readiness gate blocks a bad build |
 | [docs/MIGRATION_SAFETY.md](docs/MIGRATION_SAFETY.md) | Why migrations must be additive |
+| [docs/DATABASE_LOCK_GUARD.md](docs/DATABASE_LOCK_GUARD.md) | Lock guardrails: migrations vs live transactions |
+| [docs/TEST_STRATEGY.md](docs/TEST_STRATEGY.md) | Sharding, retries, quarantine, nightly suite |
+| [docs/SECRET_SCANNING.md](docs/SECRET_SCANNING.md) | Pre-commit + CI + history secret scanning |
 | [docs/REGISTRY_RETENTION.md](docs/REGISTRY_RETENTION.md) | Image retention for rollback |
 | [docs/HARDENING.md](docs/HARDENING.md) | Security hardening |
 | [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) | Variables and hosting setup |

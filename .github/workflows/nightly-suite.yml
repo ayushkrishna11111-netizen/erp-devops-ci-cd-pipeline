@@ -1,0 +1,140 @@
+# Nightly suite — docs/TEST_STRATEGY.md, docs/DATABASE_LOCK_GUARD.md,
+# docs/SECRET_SCANNING.md.
+#
+# The per-commit pipeline is deliberately fast: quarantined suites are
+# skipped, retries are modest and only changed-code pressure matters. This
+# workflow is where the slow, complete, honest checks run once a day:
+#   * the FULL server suite (including quarantined suites, retried harder);
+#   * the full client suite and production build;
+#   * the DB lock-guard proof against a real Postgres;
+#   * a full-git-history secret scan plus a gitleaks second opinion, so a
+#     credential committed and later deleted still gets found and rotated.
+name: Nightly full suite
+
+on:
+  schedule:
+    - cron: '17 22 * * *'   # 22:17 UTC, every night
+  workflow_dispatch:
+
+jobs:
+  nightly-secret-scan:
+    name: Full-history secret scan (+ gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Scanner self-test
+        run: node scripts/secret-scan.js --selftest
+
+      - name: Scan full git history
+        run: node scripts/secret-scan.js --history --report secret-scan-history-report.json
+
+      - name: gitleaks over the whole repository (second opinion)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            zricethezav/gitleaks:v8.18.4 detect \
+            --source /repo --config /repo/.gitleaks.toml \
+            --redact --no-banner --exit-code 1
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-secret-scan-report
+          path: secret-scan-*.json
+          if-no-files-found: ignore
+
+  nightly-db-lock-guard:
+    name: DB lock-guard (real Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: erp_user
+          POSTGRES_PASSWORD: erp_password
+          POSTGRES_DB: erp_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U erp_user -d erp_db"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://erp_user:erp_password@localhost:5432/erp_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: cd server && npm ci
+      - name: Run lock-guard verification
+        run: node scripts/db-lock-guard-check.js
+
+  nightly-server-suite:
+    name: Full server suite (incl. quarantined)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: cd server && npm ci
+
+      - name: Full suite with hard retries (JEST_RETRY=3)
+        run: |
+          cd server
+          JEST_RETRY=3 JEST_JUNIT=1 npm test -- --full
+
+      # Quarantined suites run SEPARATELY and never block the nightly green —
+      # but they run, so a flaky test cannot quietly rot forever. A quarantined
+      # suite that fails 5 nights in a row needs a real fix or a real deletion.
+      - name: Quarantined suites (informational)
+        continue-on-error: true
+        run: |
+          cd server
+          JEST_RETRY=3 npm test -- --only-quarantined
+
+      - name: Record quarantine state in the run summary
+        if: always()
+        run: |
+          {
+            echo "## Flaky-test quarantine"
+            echo 'Quarantined suites ran above (informational). Contents:'
+            echo '```json'
+            cat server/tests/quarantine.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-server-test-results
+          path: server/test-results/
+          if-no-files-found: ignore
+
+  nightly-client-suite:
+    name: Full client suite + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: cd client && npm ci
+      - name: Client tests with hard retries
+        run: |
+          cd client
+          CI=true JEST_RETRY=3 npx react-scripts test --watchAll=false
+      - name: Production build
+        run: |
+          cd client
+          CI=true npx react-scripts build

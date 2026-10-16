@@ -1,0 +1,4 @@
+{
+  "_about": "Flaky-test quarantine (docs/TEST_STRATEGY.md). Suites listed here are SKIPPED on every PR/push run so a flaky integration test cannot block a release, and run SEPARATELY every night (nightly-suite.yml, `npm test -- --only-quarantined`) so they are never forgotten. To quarantine a suite, add {\"path\": \"tests/foo.test.js\", \"reason\": \"...\", \"added\": \"YYYY-MM-DD\", \"issue\": \"...\"}. A quarantined suite that passes 5 nightly runs in a row should be moved back here into the normal run.",
+  "entries": []
+}
